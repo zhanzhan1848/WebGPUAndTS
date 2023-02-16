@@ -21,9 +21,16 @@ export class Renderer {
     bindGroup: GPUBindGroup;
     pipeline: GPURenderPipeline;
 
+    // Depth Stencil stuff
+    depthStencilState: GPUDepthStencilState;
+    depthStencilBuffer: GPUTexture;
+    depthStencilView: GPUTextureView;
+    depthStencilAttachment: GPURenderPassDepthStencilAttachment;
+
     // Assets
     triangleMesh: TriangleMesh;
     material: Material;
+    objectBuffer: GPUBuffer;
 
 
 
@@ -36,6 +43,8 @@ export class Renderer {
         await this.setupDevice();
 
         await this.createAssets();
+
+        await this.makeDepthBufferResources();
     
         await this.makePipeline();
     
@@ -60,10 +69,48 @@ export class Renderer {
 
     }
 
+    async makeDepthBufferResources() {
+
+        this.depthStencilState = {
+            format: "depth24plus-stencil8",
+            depthWriteEnabled: true,
+            depthCompare: "less-equal",
+        };
+
+        const size: GPUExtent3D = {
+            width: this.canvas.width,
+            height: this.canvas.height,
+            depthOrArrayLayers: 1
+        };
+        const depthBufferDescriptor: GPUTextureDescriptor = {
+            size: size,
+            format: "depth24plus-stencil8",
+            usage: GPUTextureUsage.RENDER_ATTACHMENT,
+        };
+        this.depthStencilBuffer = this.device.createTexture(depthBufferDescriptor);
+
+        const viewDescriptor: GPUTextureViewDescriptor = {
+            format: "depth24plus-stencil8",
+            dimension: "2d",
+            aspect: "all"
+        };
+        this.depthStencilView = this.depthStencilBuffer.createView(viewDescriptor);
+
+        this.depthStencilAttachment = {
+            view: this.depthStencilView,
+            depthClearValue: 1.0,
+            depthLoadOp: "clear",
+            depthStoreOp: "store",
+
+            stencilLoadOp: "clear",
+            stencilStoreOp: "discard"
+        };
+    }
+
     async makePipeline() {
 
         this.uniformBuffer = this.device.createBuffer({
-            size: 64 * 3,    // mat4x4 : 4 * 4 * 4bytes(32bit floats)
+            size: 64 * 2,    // mat4x4 : 4 * 4 * 4bytes(32bit floats)
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         });
 
@@ -83,6 +130,14 @@ export class Renderer {
                     binding: 2,
                     visibility: GPUShaderStage.FRAGMENT,
                     sampler: {}
+                },
+                {
+                    binding: 3,
+                    visibility: GPUShaderStage.VERTEX,
+                    buffer: {
+                        type: "read-only-storage",
+                        hasDynamicOffset: false
+                    }
                 }
             ],
         });
@@ -103,6 +158,12 @@ export class Renderer {
                 { 
                     binding: 2,
                     resource: this.material.sampler
+                },
+                { 
+                    binding: 3,
+                    resource: {
+                        buffer: this.objectBuffer
+                    }
                 }
             ]
         });
@@ -134,7 +195,8 @@ export class Renderer {
                 topology : "triangle-list"
             },
     
-            layout: pipelineLayout
+            layout: pipelineLayout,
+            depthStencil: this.depthStencilState,
         });
 
     }
@@ -143,10 +205,16 @@ export class Renderer {
         this.triangleMesh = new TriangleMesh(this.device);
         this,this.material = new Material();
 
+        const modelBufferDescriptor: GPUBufferDescriptor = {
+            size: 64 * 1024,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        };
+        this.objectBuffer = this.device.createBuffer(modelBufferDescriptor);
+
         await this.material.initialize(this.device, "dist/img/chat.jpg");
     }
 
-    async render(camera: Camera, triangles: Triangle[]) {
+    async render(camera: Camera, triangles: Float32Array, triangle_count: number) {
 
         // Make transforms
         const projection = mat4.create();
@@ -154,8 +222,9 @@ export class Renderer {
 
         const view = camera.get_view();
 
-        this.device.queue.writeBuffer(this.uniformBuffer, 64, <ArrayBuffer>view);
-        this.device.queue.writeBuffer(this.uniformBuffer, 128, <ArrayBuffer>projection);
+        this.device.queue.writeBuffer(this.objectBuffer, 0, triangles, 0, triangles.length);
+        this.device.queue.writeBuffer(this.uniformBuffer, 0, <ArrayBuffer>view);
+        this.device.queue.writeBuffer(this.uniformBuffer, 64, <ArrayBuffer>projection);
 
 
         //command encoder: records draw commands for submission
@@ -169,19 +238,13 @@ export class Renderer {
                 clearValue: {r: 0.5, g: 0.0, b: 0.25, a: 1.0},
                 loadOp: "clear",
                 storeOp: "store"
-            }]
+            }],
+            depthStencilAttachment: this.depthStencilAttachment,
         });
         renderpass.setPipeline(this.pipeline);
         renderpass.setVertexBuffer(0, this.triangleMesh.buffer);
-
-        triangles.forEach(
-            (triangle) => {
-                const model = triangle.get_model();
-                this.device.queue.writeBuffer(this.uniformBuffer, 0, <ArrayBuffer>model);
-                renderpass.setBindGroup(0, this.bindGroup);
-                renderpass.draw(3, 1, 0, 0);
-            }
-        );
+        renderpass.setBindGroup(0, this.bindGroup);
+        renderpass.draw(3, triangle_count, 0, 0);
         renderpass.end();
     
         this.device.queue.submit([commandEncoder.finish()]);
