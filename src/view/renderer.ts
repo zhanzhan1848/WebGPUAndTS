@@ -2,6 +2,9 @@ import shader from "./shaders/shaders.wgsl";
 import { TriangleMesh } from "./triangle_mesh";
 import { mat4 } from "gl-matrix";
 import { Material } from "./material";
+import { Camera } from "../model/camera";
+import { Triangle } from "../model/triangle";
+
 
 export class Renderer {
 
@@ -22,13 +25,10 @@ export class Renderer {
     triangleMesh: TriangleMesh;
     material: Material;
 
-    // A little dodgy but le's do this for not
-    t: number;
 
 
     constructor(canvas: HTMLCanvasElement){
         this.canvas = canvas;
-        this.t = 0.0;
     }
 
    async Initialize() {
@@ -39,7 +39,6 @@ export class Renderer {
     
         await this.makePipeline();
     
-        this.render();
     }
 
     async setupDevice() {
@@ -147,25 +146,14 @@ export class Renderer {
         await this.material.initialize(this.device, "dist/img/chat.jpg");
     }
 
-    render = () => {
+    async render(camera: Camera, triangles: Triangle[]) {
 
-        this.t += 0.01;
-        
-        if(this.t > 2.0 * Math.PI)
-        {
-            this.t -= 2.0 * Math.PI;
-        }
-
+        // Make transforms
         const projection = mat4.create();
         mat4.perspective(projection, Math.PI / 4, 800 / 600, 0.1, 10);
 
-        const view = mat4.create();
-        mat4.lookAt(view, [-2, 0, 2], [0, 0, 0], [0, 0, 1]);
+        const view = camera.get_view();
 
-        const model = mat4.create();
-        mat4.rotate(model, model, this.t, [0, 0, 1]);
-
-        this.device.queue.writeBuffer(this.uniformBuffer, 0, <ArrayBuffer>model);
         this.device.queue.writeBuffer(this.uniformBuffer, 64, <ArrayBuffer>view);
         this.device.queue.writeBuffer(this.uniformBuffer, 128, <ArrayBuffer>projection);
 
@@ -185,12 +173,18 @@ export class Renderer {
         });
         renderpass.setPipeline(this.pipeline);
         renderpass.setVertexBuffer(0, this.triangleMesh.buffer);
-        renderpass.setBindGroup(0, this.bindGroup);
-        renderpass.draw(3, 1, 0, 0);
+
+        triangles.forEach(
+            (triangle) => {
+                const model = triangle.get_model();
+                this.device.queue.writeBuffer(this.uniformBuffer, 0, <ArrayBuffer>model);
+                renderpass.setBindGroup(0, this.bindGroup);
+                renderpass.draw(3, 1, 0, 0);
+            }
+        );
         renderpass.end();
     
         this.device.queue.submit([commandEncoder.finish()]);
 
-        requestAnimationFrame(this.render);
     }
 }
